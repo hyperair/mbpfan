@@ -571,8 +571,12 @@ void check_requirements(const char* program_path)
 
 void mbpfan()
 {
-    int old_temp, new_temp, fan_speed, steps;
+    int old_temp, new_temp, fan_speed;
     int temp_change;
+    float accumulated_i = 0, new_accumulated_i = 0;
+    float kP;
+    float kI;
+    float kD;
     
     sensors = retrieve_sensors();
     fans = retrieve_fans();
@@ -610,6 +614,10 @@ void mbpfan()
        fan = fan->next;
     }
 
+    kP = 1.0 / (max_temp - low_temp);
+    kI = 0.5 * kP;
+    kD = 0.1;  // full speed for +10°C/s temp change
+
 recalibrate:
     if(verbose) {
         mbp_log(LOG_INFO, "Sleeping for 2 seconds to get first temp delta");
@@ -619,33 +627,41 @@ recalibrate:
     while(1) {
         old_temp = new_temp;
         new_temp = get_temp(sensors);
+        int target_temp = high_temp;
+        int error = new_temp - target_temp;
+        /* int error = min(new_temp - low_temp, max(new_temp - high_temp, 0)); */
+
+        new_accumulated_i = max(-1.0, min(1.0, accumulated_i + kI * error));
+        temp_change = new_temp - old_temp;
 
         fan = fans;
 
 	while(fan != NULL) {
 	    fan_speed = fan->old_speed;
 
-	    if(new_temp >= max_temp && fan->old_speed != fan->fan_max_speed) {
+	    if(new_temp >= max_temp) {
                 fan_speed = fan->fan_max_speed;
-            }
-
-            if(new_temp <= low_temp && fan_speed != fan->fan_min_speed) {
+            } else if(new_temp <= low_temp) {
                 fan_speed = fan->fan_min_speed;
+            } else {
+                int range = fan->fan_max_speed - fan->fan_min_speed;
+                int offset = fan->fan_min_speed;
+
+                fan_speed = offset + (error * kP + new_accumulated_i + temp_change * kD / polling_interval) * range;
+
+                if (fan->fan_min_speed < fan_speed && fan_speed < fan->fan_max_speed) {
+                    /* accumulated_i runs away if we're maxed out on either side */
+                    accumulated_i = new_accumulated_i;
+                }
             }
 
-            temp_change = new_temp - old_temp;
-
-            if(temp_change > 0 && new_temp > high_temp && new_temp < max_temp) {
-                steps = ( new_temp - high_temp ) * ( new_temp - high_temp + 1 ) / 2;
-                fan_speed = max( fan_speed, ceil(fan->fan_min_speed + steps * fan->step_up) );
-            }
-
-            if(temp_change < 0 && new_temp > low_temp && new_temp < max_temp) {
-                steps = ( max_temp - new_temp ) * ( max_temp - new_temp + 1 ) / 2;
-                fan_speed = min( fan_speed, floor(fan->fan_max_speed - steps * fan->step_down) );
-            }
+            /* make sure we don't go out of range */
+            fan_speed = min(fan->fan_max_speed, fan_speed);
+            fan_speed = max(fan->fan_min_speed, fan_speed);
 
             if(verbose) {
+                mbp_log(LOG_INFO, "error=%d, prop_factor=%f, i_factor=%f, d_factor=%f",
+                        error, error * kP, accumulated_i, temp_change * kD / polling_interval);
                 mbp_log(LOG_INFO, "Old Temp: %d New Temp: %d Fan: %s Speed: %d", old_temp, new_temp, fan->label, fan_speed);
 	    }
 
