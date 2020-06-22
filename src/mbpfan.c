@@ -45,6 +45,7 @@
 #include "global.h"
 #include "settings.h"
 #include "util.h"
+#include "moving-average.h"
 
 /* lazy min/max... */
 #define min(a,b) ((a) < (b) ? (a) : (b))
@@ -66,6 +67,7 @@ int max_temp = 86;   // do not set it > 90
 #define NUM_HWMONS 12
 #define NUM_TEMP_INPUTS 64
 #define NUM_FANS 10
+#define NUM_TEMP_SAMPLES 5
 // sane defaults when user provides unexpected values
 #define MIN_FAN_SPEED_DEFAULT 500
 #define MAX_FAN_SPEED_DEFAULT 6500
@@ -578,6 +580,9 @@ void mbpfan()
     float kI;
     float kD;
 
+    // ring buffer for moving average of samples
+    t_moving_average temp_smoother;
+
     sensors = retrieve_sensors();
     fans = retrieve_fans();
 
@@ -602,6 +607,8 @@ void mbpfan()
 
     new_temp = get_temp(sensors);
     set_fan_minimum_speed(fans);
+    moving_average_init(&temp_smoother, NUM_TEMP_SAMPLES);
+    moving_average_push(&temp_smoother, new_temp);
 
     fan = fans;
     while(fan != NULL) {
@@ -622,11 +629,16 @@ recalibrate:
     if(verbose) {
         mbp_log(LOG_INFO, "Sleeping for 2 seconds to get first temp delta");
     }
+    /* reinitialize moving average buffer, we've got some stale entries */
+    old_temp = moving_average_calc(&temp_smoother);
+    moving_average_reset(&temp_smoother);
+    moving_average_push(&temp_smoother, old_temp);
+
     sleep(2);
 
     while(1) {
         old_temp = new_temp;
-        new_temp = get_temp(sensors);
+        new_temp = moving_average_push(&temp_smoother, get_temp(sensors));
         int target_temp = high_temp;
         int error = new_temp - target_temp;
         /* int error = min(new_temp - low_temp, max(new_temp - high_temp, 0)); */
